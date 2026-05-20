@@ -1,0 +1,27 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('wallets', function (Blueprint $table) {
+            $table->foreignId('employee_id')->nullable()->after('id')->constrained()->nullOnDelete();
+            $table->string('type', 32)->nullable()->after('name');
+
+            $table->unique(['employee_id', 'type']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('wallets', function (Blueprint $table) {
+            $table->dropUnique(['employee_id', 'type']);
+            $table->dropConstrainedForeignId('employee_id');
+            $table->dropColumn('type');
+        });
+    }
+};

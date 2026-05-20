@@ -1,0 +1,531 @@
+{
+  "info": {
+    "_postman_id": "employee-wallet-api",
+    "name": "Employee Wallet API",
+    "description": "# Employee Wallet & Payroll API\n\nBase URL: `{{base_url}}` (default `http://127.0.0.1:8000`)\n\n## Before you start\n\n```bash\ncd employee-wallet\nphp artisan migrate\nphp artisan db:seed\nphp artisan serve\n```\n\n## Collection variables (auto-set)\n\nRun **Setup → List wallets (seed)** first. It sets `wallet_id`, `from_wallet_id`, `to_wallet_id`, and `employee_id` from demo data (`emp-alice` salary → savings).\n\n## Bank callback manual test\n\n1. In `.env`: `BANK_AUTO_CALLBACK=false` then **restart** `php artisan serve`\n2. Run **Flows → 4a. Withdrawal (manual bank test)**\n3. Run **Flows → 4b. Bank callback (completed)** or **(failed)**\n\n`bank_reference` is saved automatically after step 2.\n\nWith `BANK_AUTO_CALLBACK=true` (default), the queue job completes withdrawals automatically — use **4. Withdrawal (auto)** only.\n\n## Amounts\n\nAll amounts are **integer cents** (e.g. `100000` = $1,000.00).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000" },
+    { "key": "employee_id", "value": "1" },
+    { "key": "wallet_id", "value": "1" },
+    { "key": "from_wallet_id", "value": "1" },
+    { "key": "to_wallet_id", "value": "2" },
+    { "key": "bank_reference", "value": "" },
+    { "key": "withdrawal_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Setup",
+      "description": "Run once after `php artisan db:seed` to populate collection variables.",
+      "item": [
+        {
+          "name": "List wallets (seed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json().data || [];",
+                  "const aliceSalary = data.find(w => w.employee_name && w.employee_name.includes('Alice') && w.type === 'salary');",
+                  "const aliceSavings = data.find(w => w.employee_name && w.employee_name.includes('Alice') && w.type === 'savings');",
+                  "if (aliceSalary) {",
+                  "    pm.collectionVariables.set('wallet_id', String(aliceSalary.id));",
+                  "    pm.collectionVariables.set('from_wallet_id', String(aliceSalary.id));",
+                  "    pm.collectionVariables.set('employee_id', String(aliceSalary.employee_id));",
+                  "}",
+                  "if (aliceSavings) {",
+                  "    pm.collectionVariables.set('to_wallet_id', String(aliceSavings.id));",
+                  "}",
+                  "if (!aliceSalary && data.length > 0) {",
+                  "    pm.collectionVariables.set('wallet_id', String(data[0].id));",
+                  "    pm.collectionVariables.set('from_wallet_id', String(data[0].id));",
+                  "    if (data.length > 1) pm.collectionVariables.set('to_wallet_id', String(data[1].id));",
+                  "}",
+                  "console.log('wallet_id=', pm.collectionVariables.get('wallet_id'));",
+                  "console.log('from_wallet_id=', pm.collectionVariables.get('from_wallet_id'));",
+                  "console.log('to_wallet_id=', pm.collectionVariables.get('to_wallet_id'));",
+                  "pm.test('wallets loaded', () => pm.expect(data.length).to.be.above(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallets?per_page=50"
+          }
+        },
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{base_url}}/api/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Flows (recommended order)",
+      "description": "End-to-end paths for take-home demo.",
+      "item": [
+        {
+          "name": "1. Payroll credit",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"payroll-flow-{{$timestamp}}\",\n  \"external_event_id\": \"evt-payroll-flow-{{$timestamp}}\",\n  \"items\": [\n    {\n      \"employee_external_ref\": \"emp-alice\",\n      \"amount\": 250000,\n      \"external_item_id\": \"line-alice-1\"\n    },\n    {\n      \"employee_external_ref\": \"emp-bob\",\n      \"amount\": 180000,\n      \"external_item_id\": \"line-bob-1\"\n    }\n  ]\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/payroll/runs"
+          }
+        },
+        {
+          "name": "1b. Payroll replay (duplicate)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"payroll-flow-DUPLICATE\",\n  \"external_event_id\": \"evt-payroll-flow-DUPLICATE\",\n  \"items\": [\n    {\n      \"employee_external_ref\": \"emp-alice\",\n      \"amount\": 999999,\n      \"external_item_id\": \"line-dup\"\n    }\n  ]\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/payroll/runs",
+            "description": "Run twice with the same keys — second response should have duplicate: true."
+          }
+        },
+        {
+          "name": "2. Transfer salary → savings",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_wallet_id\": {{from_wallet_id}},\n  \"to_wallet_id\": {{to_wallet_id}},\n  \"amount\": 100000\n}"
+            },
+            "url": "{{base_url}}/api/wallets/transfers"
+          }
+        },
+        {
+          "name": "3. View ledger",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/api/wallets/{{wallet_id}}/ledger?page=1&per_page=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "wallets", "{{wallet_id}}", "ledger"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "per_page", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "4. Withdrawal (auto — BANK_AUTO_CALLBACK=true)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.withdrawal_id) pm.collectionVariables.set('withdrawal_id', String(json.withdrawal_id));",
+                  "if (json.bank_reference) pm.collectionVariables.set('bank_reference', json.bank_reference);",
+                  "pm.test('withdrawal accepted', () => pm.expect([200, 202]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 50000,\n  \"idempotency_key\": \"withdraw-auto-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/wallets/{{wallet_id}}/withdrawals",
+            "description": "Default .env completes via queue job. Status should become completed without manual callback."
+          }
+        },
+        {
+          "name": "4a. Withdrawal (manual bank test)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.withdrawal_id) {",
+                  "    pm.collectionVariables.set('withdrawal_id', String(json.withdrawal_id));",
+                  "}",
+                  "if (json.bank_reference) {",
+                  "    pm.collectionVariables.set('bank_reference', json.bank_reference);",
+                  "    console.log('Saved bank_reference:', json.bank_reference);",
+                  "}",
+                  "pm.test('status is processing', () => pm.expect(json.status).to.eql('processing'));",
+                  "pm.test('bank_reference present', () => {",
+                  "    pm.expect(json.bank_reference, 'Set BANK_AUTO_CALLBACK=false in .env and restart server').to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 50000,\n  \"idempotency_key\": \"withdraw-manual-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/wallets/{{wallet_id}}/withdrawals",
+            "description": "Requires BANK_AUTO_CALLBACK=false. Leaves withdrawal in processing with a real bank_reference."
+          }
+        },
+        {
+          "name": "4b. Bank callback (completed)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ref = pm.collectionVariables.get('bank_reference');",
+                  "if (!ref) {",
+                  "    console.warn('bank_reference is empty — run \"4a. Withdrawal (manual bank test)\" first.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('not route 404', () => pm.expect(pm.response.code).to.not.eql(404));",
+                  "pm.test('callback applied', () => pm.expect(pm.response.json().status).to.be.oneOf(['completed', 'failed']));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bank_reference\": \"{{bank_reference}}\",\n  \"status\": \"completed\",\n  \"idempotency_key\": \"cb-completed-{{$timestamp}}\",\n  \"external_event_id\": \"evt-cb-completed-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/bank/withdrawal-status"
+          }
+        },
+        {
+          "name": "4c. Bank callback (failed)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ref = pm.collectionVariables.get('bank_reference');",
+                  "if (!ref) console.warn('Run 4a first to set bank_reference.');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('not route 404', () => pm.expect(pm.response.code).to.not.eql(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bank_reference\": \"{{bank_reference}}\",\n  \"status\": \"failed\",\n  \"idempotency_key\": \"cb-failed-{{$timestamp}}\",\n  \"external_event_id\": \"evt-cb-failed-{{$timestamp}}\",\n  \"failure_reason\": \"Insufficient funds at bank\"\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/bank/withdrawal-status"
+          }
+        },
+        {
+          "name": "5. Get withdrawal status",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallets/{{wallet_id}}/withdrawals/{{withdrawal_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "GET /api/employees",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/api/employees?page=1&per_page=20&search=alice",
+              "host": ["{{base_url}}"],
+              "path": ["api", "employees"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "per_page", "value": "20" },
+                { "key": "search", "value": "alice" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /api/employees/{id}",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{base_url}}/api/employees/{{employee_id}}"
+          }
+        },
+        {
+          "name": "GET /api/wallets",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/api/wallets?page=1&per_page=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "wallets"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "per_page", "value": "20" },
+                { "key": "employee_id", "value": "{{employee_id}}", "disabled": true },
+                { "key": "type", "value": "salary", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /api/wallets/{id}/ledger",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/api/wallets/{{wallet_id}}/ledger?page=1&per_page=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "wallets", "{{wallet_id}}", "ledger"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "per_page", "value": "20" },
+                { "key": "type", "value": "payroll_credit", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /api/wallets/{id}/ledger?type=withdrawal_settled",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/api/wallets/{{wallet_id}}/ledger?page=1&type=withdrawal_settled",
+              "host": ["{{base_url}}"],
+              "path": ["api", "wallets", "{{wallet_id}}", "ledger"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "type", "value": "withdrawal_settled" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Payroll webhook",
+      "item": [
+        {
+          "name": "POST /api/webhooks/payroll/runs",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"payroll-{{$timestamp}}\",\n  \"external_event_id\": \"evt-payroll-{{$timestamp}}\",\n  \"items\": [\n    {\n      \"employee_external_ref\": \"emp-alice\",\n      \"amount\": 100000,\n      \"external_item_id\": \"line-1\"\n    }\n  ]\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/payroll/runs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transfer",
+      "item": [
+        {
+          "name": "POST /api/wallets/transfers",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_wallet_id\": {{from_wallet_id}},\n  \"to_wallet_id\": {{to_wallet_id}},\n  \"amount\": 100000\n}"
+            },
+            "url": "{{base_url}}/api/wallets/transfers"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Withdrawal",
+      "item": [
+        {
+          "name": "POST /api/wallets/{id}/withdrawals",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.withdrawal_id) pm.collectionVariables.set('withdrawal_id', String(json.withdrawal_id));",
+                  "if (json.bank_reference) pm.collectionVariables.set('bank_reference', json.bank_reference);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 50000,\n  \"idempotency_key\": \"withdraw-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/wallets/{{wallet_id}}/withdrawals"
+          }
+        },
+        {
+          "name": "GET /api/wallets/{id}/withdrawals/{withdrawalId}",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallets/{{wallet_id}}/withdrawals/{{withdrawal_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bank callback",
+      "item": [
+        {
+          "name": "POST /api/webhooks/bank/withdrawal-status (completed)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('bank_reference')) {",
+                  "    throw new Error('bank_reference is empty. Run Setup, then Flow 4a (BANK_AUTO_CALLBACK=false).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bank_reference\": \"{{bank_reference}}\",\n  \"status\": \"completed\",\n  \"idempotency_key\": \"cb-completed-{{$timestamp}}\",\n  \"external_event_id\": \"evt-cb-completed-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/bank/withdrawal-status"
+          }
+        },
+        {
+          "name": "POST /api/webhooks/bank/callback (alias)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bank_reference\": \"{{bank_reference}}\",\n  \"status\": \"completed\",\n  \"idempotency_key\": \"cb-alias-{{$timestamp}}\",\n  \"external_event_id\": \"evt-cb-alias-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/bank/callback"
+          }
+        },
+        {
+          "name": "POST /api/webhooks/bank/withdrawal-status (failed)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bank_reference\": \"{{bank_reference}}\",\n  \"status\": \"failed\",\n  \"idempotency_key\": \"cb-failed-{{$timestamp}}\",\n  \"external_event_id\": \"evt-cb-failed-{{$timestamp}}\",\n  \"failure_reason\": \"Manual test failure\"\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/bank/withdrawal-status"
+          }
+        },
+        {
+          "name": "POST bank callback — invalid reference (expect 404 JSON)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bank_reference\": \"00000000-0000-0000-0000-000000000000\",\n  \"status\": \"completed\",\n  \"idempotency_key\": \"cb-invalid-{{$timestamp}}\"\n}"
+            },
+            "url": "{{base_url}}/api/webhooks/bank/withdrawal-status",
+            "description": "Expect 404 with message explaining bank_reference not found (not a routing 404)."
+          }
+        }
+      ]
+    }
+  ]
+}
